@@ -1,93 +1,105 @@
 # Preprocess
 
-from accelerate import FullyShardedDataParallelPlugin, Accelerator
-from datasets import load_dataset
-import matplotlib.pyplot as plt
-import os
-import torch
-from torch.distributed.fsdp.fully_sharded_data_parallel import FullOptimStateDictConfig, FullStateDictConfig
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import wandb
+import pandas as pd
+from datasets import Dataset
+from pathlib import Path
+from tqdm import tqdm
 
-TEST_SPLIT = 0.2
-BASE_MODEL_ID = 'deepseek-ai/DeepSeek-R1-Distill-Qwen-7B'
+DATA_DIR = "data/"
+OUTPUT_DIR = "dataset/"
+TRAIN_TEST_SPLIT = 0.2
+VAL_TEST_SPLIT = 0.1
+RANDOM_SEED = 42
 
-def formatting_func(example):
-    text = f"### Question: {example['input']}\n ### Answer: {example['output']}"
-    return text
+data_dir = Path(DATA_DIR)
+csv_files = {
+    "allergies": data_dir / "allergies.csv",
+    "careplans": data_dir / "careplans.csv",
+    "conditions": data_dir / "conditions.csv",
+    "medications": data_dir / "medications.csv",
+    "observations": data_dir / "observations.csv",
+    "encounters": data_dir / "encounters.csv",
+}
 
-def plot_data_lengths(tokenized_train_dataset, tokenized_val_dataset):
-    lengths = [len(x['input_ids']) for x in tokenized_train_dataset]
-    lengths += [len(x['input_ids']) for x in tokenized_val_dataset]
-    print(len(lengths))
+# Load CSV files into DataFrames
+dfs = {key: pd.read_csv(file) for key, file in csv_files.items()}
 
-    # Plotting the histogram
-    plt.figure(figsize=(10, 6))
-    plt.hist(lengths, bins=20, alpha=0.7, color='blue')
-    plt.xlabel('Length of input_ids')
-    plt.ylabel('Frequency')
-    plt.title('Distribution of Lengths of input_ids')
-    plt.show()
+# Define COVID-19 related codes
+covid_codes = {"840539006": "COVID-19", "840544004": "Suspected COVID-19"}
+
+def process_encounter(enc_id, patient_id, dfs):
+    """Process data for a single encounter into a text string and label."""
+    # Extract encounter-specific data
+    enc_conditions = dfs["conditions"][dfs["conditions"]["ENCOUNTER"] == enc_id]
+    enc_medications = dfs["medications"][dfs["medications"]["ENCOUNTER"] == enc_id]
+    enc_allergies = dfs["allergies"][dfs["allergies"]["ENCOUNTER"] == enc_id]
+    enc_observations = dfs["observations"][dfs["observations"]["ENCOUNTER"] == enc_id]
+    enc_careplans = dfs["careplans"][(dfs["careplans"]["ENCOUNTER"] == enc_id) & 
+                                    (dfs["careplans"]["PATIENT"] == patient_id)]
+
+    # Symptoms from conditions and observations
+    symptoms = []
+    if not enc_conditions.empty:
+        symptoms.extend(enc_conditions["DESCRIPTION"].tolist())
+    if not enc_observations.empty:
+        obs = enc_observations[["DESCRIPTION", "VALUE", "UNITS"]].dropna()
+        symptoms.extend([f"{row['DESCRIPTION']}: {row['VALUE']} {row['UNITS']}" 
+                         for _, row in obs.iterrows()])
+
+    # Medications
+    meds = enc_medications["DESCRIPTION"].tolist() if not enc_medications.empty else ["none"]
+
+    # Allergies
+    allergies = enc_allergies["DESCRIPTION"].tolist() if not enc_allergies.empty else ["none"]
+
+    # Determine label (COVID-19 or not)
+    label = "non-COVID"
+    if not enc_conditions.empty:
+        if enc_conditions["CODE"].isin(covid_codes.keys()).any():
+            label = "COVID-19"
+    elif not enc_careplans.empty:
+        if enc_careplans["REASONCODE"].isin(covid_codes.keys()).any():
+            label = "COVID-19"
+
+    # Construct input text
+    input_text = (
+        f"Symptoms: {', '.join(symptoms) if symptoms else 'none'}; "
+        f"Medications: {', '.join(meds)}; "
+        f"Allergies: {', '.join(allergies)}"
+    )
+    
+    return {"text": input_text, "label": label}
 
 def main():
-	fsdp_plugin = FullyShardedDataParallelPlugin(
-		state_dict_config=FullStateDictConfig(offload_to_cpu=True, rank0_only=False),
-		optim_state_dict_config=FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=False),
-	)
+    # Process all encounters
+    encounter_data = []
+    for _, enc in tqdm(dfs["encounters"].iterrows(), total=len(dfs["encounters"]), desc="Processing encounters"):
+        result = process_encounter(enc["Id"], enc["PATIENT"], dfs)
+        encounter_data.append(result)
 
-	accelerator = Accelerator(fsdp_plugin=fsdp_plugin)
+    # Convert to Hugging Face Dataset
+    dataset = Dataset.from_list(encounter_data)
 
-	wandb.login()
-	wandb_project = "llm_tutorial"
-	if len(wandb_project) > 0:
-		os.environ["WANDB_PROJECT"] = wandb_project
+    # Split into train, validation, and test sets
+    train_test = dataset.train_test_split(test_size=TRAIN_TEST_SPLIT, seed=RANDOM_SEED)
+    train_val = train_test["train"].train_test_split(test_size=VAL_TEST_SPLIT, seed=RANDOM_SEED)
 
-	dataset = load_dataset(
-		'csv',
-		data_files=['data/allergies.csv', 
-					'data/conditions.csv', 
-					'data/encounters.csv',
-					'data/immunizations.csv',
-					'data/observations.csv',
-					'data/patients.csv',
-					'data/payer_transitions.csv',
-					'data/providers.csv',
-					'data/careplans.csv',
-					'data/devices.csv',
-					'data/imaging_studies.csv',
-					'data/medications.csv',
-					'data/organizations.csv',
-					'data/payers.csv',
-					'data/procedures.csv',
-					'data/supplies.csv',
-					],
-		split='train'
-	)
+    final_dataset = {
+        "train": train_val["train"],
+        "validation": train_val["test"],
+        "test": train_test["test"]
+    }
 
-	train_test_split = dataset.train_test_split(test_size=TEST_SPLIT)
-	train_dataset = train_test_split['train']
-	test_dataset = train_test_split['test']
+    # Save the dataset
+    output_dir = Path(OUTPUT_DIR)
+    output_dir.mkdir(exist_ok=True)
+    for split, ds in final_dataset.items():
+        ds.to_csv(output_dir / f"{split}.csv", index=False)
 
-	base_model_id = BASE_MODEL_ID
-	model = AutoModelForCausalLM.from_pretrained(base_model_id, trust_remote_code=True, torch_dtype=torch.float16, load_in_8bit=True)
-
-
-	tokenizer = AutoTokenizer.from_pretrained(
-		base_model_id,
-		padding_side="left",
-		add_eos_token=True,
-		add_bos_token=True,
-		use_fast=False,
-	)
-
-	def generate_and_tokenize_prompt(prompt):
-		return tokenizer(formatting_func(prompt))
-
-	tokenizer.pad_token = tokenizer.eos_token
-	tokenized_train_dataset = train_dataset.map(generate_and_tokenize_prompt)
-	tokenized_val_dataset = test_dataset.map(generate_and_tokenize_prompt)
-
-	plot_data_lengths(tokenized_train_dataset, tokenized_val_dataset)
+    print("Data preparation complete. Dataset saved to:", output_dir)
+    print("Train size:", len(final_dataset["train"]))
+    print("Validation size:", len(final_dataset["validation"]))
+    print("Test size:", len(final_dataset["test"]))
 
 if __name__ == '__main__':
-	main()
+    main()

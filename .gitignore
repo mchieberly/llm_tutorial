@@ -4,8 +4,8 @@ __pycache__/
 *$py.class
 
 # Data
-/data/
-/dataset/
+/raw_data/
+/processed_data/
 
 # C extensions
 *.so

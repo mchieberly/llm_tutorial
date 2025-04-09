@@ -1,17 +1,17 @@
-# Preprocess
-
 import pandas as pd
 from datasets import Dataset
 from pathlib import Path
 from tqdm import tqdm
 
-DATA_DIR = "data/"
-OUTPUT_DIR = "dataset/"
-TRAIN_TEST_SPLIT = 0.2
-VAL_TEST_SPLIT = 0.1
+# Constants
+TEST_SPLIT = 0.2
+VAL_SPLIT = 0.1
 RANDOM_SEED = 42
+RAW_DATA_DIR = "./raw_data"
+PROCESSED_DATA_DIR = "./processed_data"
 
-data_dir = Path(DATA_DIR)
+# Define file paths
+data_dir = Path(RAW_DATA_DIR)
 csv_files = {
     "allergies": data_dir / "allergies.csv",
     "careplans": data_dir / "careplans.csv",
@@ -21,68 +21,107 @@ csv_files = {
     "encounters": data_dir / "encounters.csv",
 }
 
-# Load CSV files into DataFrames
-dfs = {key: pd.read_csv(file) for key, file in csv_files.items()}
+# Load CSV files into DataFrames with string dtype for codes and set indices
+dfs = {
+    "allergies": pd.read_csv(csv_files["allergies"], dtype={"CODE": str}).set_index(["PATIENT", "ENCOUNTER"]),
+    "careplans": pd.read_csv(csv_files["careplans"], dtype={"CODE": str, "REASONCODE": str}).set_index(["PATIENT", "ENCOUNTER"]),
+    "conditions": pd.read_csv(csv_files["conditions"], dtype={"CODE": str}).set_index("ENCOUNTER"),
+    "medications": pd.read_csv(csv_files["medications"], dtype={"CODE": str}).set_index("ENCOUNTER"),
+    "observations": pd.read_csv(csv_files["observations"], dtype={"CODE": str}).set_index("ENCOUNTER"),
+    "encounters": pd.read_csv(csv_files["encounters"]).set_index("Id"),
+}
 
 # Define COVID-19 related codes
 covid_codes = {"840539006": "COVID-19", "840544004": "Suspected COVID-19"}
 
-def process_encounter(enc_id, patient_id, dfs):
-    """Process data for a single encounter into a text string and label."""
-    # Extract encounter-specific data
-    enc_conditions = dfs["conditions"][dfs["conditions"]["ENCOUNTER"] == enc_id]
-    enc_medications = dfs["medications"][dfs["medications"]["ENCOUNTER"] == enc_id]
-    enc_allergies = dfs["allergies"][dfs["allergies"]["ENCOUNTER"] == enc_id]
-    enc_observations = dfs["observations"][dfs["observations"]["ENCOUNTER"] == enc_id]
-    enc_careplans = dfs["careplans"][(dfs["careplans"]["ENCOUNTER"] == enc_id) & 
-                                    (dfs["careplans"]["PATIENT"] == patient_id)]
+def preprocess_data(dfs):
+    """Preprocess all data into a single DataFrame per encounter with progress tracking."""
+    # Aggregation steps with progress
+    print("Aggregating data...")
+    aggregations = {
+        "conditions": dfs["conditions"].groupby("ENCOUNTER").agg({
+            "DESCRIPTION": lambda x: ", ".join(x) if len(x) > 0 else "none",
+            "CODE": list
+        }).rename(columns={"DESCRIPTION": "symptoms_conditions", "CODE": "condition_codes"}),
+        "medications": dfs["medications"].groupby("ENCOUNTER").agg({
+            "DESCRIPTION": lambda x: ", ".join(x) if len(x) > 0 else "none"
+        }).rename(columns={"DESCRIPTION": "medications"}),
+        "allergies": dfs["allergies"].groupby(["PATIENT", "ENCOUNTER"]).agg({
+            "DESCRIPTION": lambda x: ", ".join(x) if len(x) > 0 else "none"
+        }).rename(columns={"DESCRIPTION": "allergies"}),
+        "careplans": dfs["careplans"].groupby(["PATIENT", "ENCOUNTER"]).agg({
+            "REASONCODE": list
+        }).rename(columns={"REASONCODE": "careplan_codes"})
+    }
 
-    # Symptoms from conditions and observations
-    symptoms = []
-    if not enc_conditions.empty:
-        symptoms.extend(enc_conditions["DESCRIPTION"].tolist())
-    if not enc_observations.empty:
-        obs = enc_observations[["DESCRIPTION", "VALUE", "UNITS"]].dropna()
-        symptoms.extend([f"{row['DESCRIPTION']}: {row['VALUE']} {row['UNITS']}" 
-                         for _, row in obs.iterrows()])
+    # Handle observations separately with tqdm for finer progress
+    print("Aggregating observations...")
+    obs_groups = dfs["observations"].groupby("ENCOUNTER")
+    observations_agg = pd.DataFrame(index=obs_groups.groups.keys(), columns=["symptoms_observations"])
+    observations_agg.index.name = "ENCOUNTER"  # Explicitly name the index
+    for enc in tqdm(obs_groups.groups.keys(), desc="Processing observations"):
+        group = obs_groups.get_group(enc)
+        if not group.empty:
+            observations_agg.loc[enc, "symptoms_observations"] = "¿ ".join(
+                f"{row['DESCRIPTION']}: {row['VALUE']} {row['UNITS']}"
+                for _, row in group[["DESCRIPTION", "VALUE", "UNITS"]].dropna().iterrows()
+            )
+        else:
+            observations_agg.loc[enc, "symptoms_observations"] = "none"
 
-    # Medications
-    meds = enc_medications["DESCRIPTION"].tolist() if not enc_medications.empty else ["none"]
+    # Merge all into one DataFrame with progress
+    print("Merging data...")
+    data = dfs["encounters"][["PATIENT"]].reset_index()
+    merge_steps = [
+        ("conditions", aggregations["conditions"], {"symptoms_conditions": "none"}, ["Id"], ["ENCOUNTER"]),
+        ("medications", aggregations["medications"], {"medications": "none"}, ["Id"], ["ENCOUNTER"]),
+        ("allergies", aggregations["allergies"], {"allergies": "none"}, ["PATIENT", "Id"], ["PATIENT", "ENCOUNTER"]),
+        ("observations", observations_agg, {"symptoms_observations": "none"}, ["Id"], ["ENCOUNTER"]),
+        ("careplans", aggregations["careplans"], {}, ["PATIENT", "Id"], ["PATIENT", "ENCOUNTER"]),
+    ]
 
-    # Allergies
-    allergies = enc_allergies["DESCRIPTION"].tolist() if not enc_allergies.empty else ["none"]
+    for name, agg_df, fill_values, left_cols, right_cols in tqdm(merge_steps, desc="Merging steps"):
+        agg_df_reset = agg_df.reset_index()
+        # Merge and drop the right join column to avoid duplicates
+        data = data.merge(agg_df_reset, left_on=left_cols, right_on=right_cols, how="left").fillna(fill_values)
+        # Drop the right_cols that aren’t needed post-merge (e.g., ENCOUNTER from right side)
+        cols_to_drop = [col for col in right_cols if col not in left_cols and col in data.columns]
+        data = data.drop(columns=cols_to_drop)
+        # Handle list columns post-merge
+        if "condition_codes" in agg_df.columns:
+            data["condition_codes"] = data["condition_codes"].apply(lambda x: x if isinstance(x, list) else [])
+        if "careplan_codes" in agg_df.columns:
+            data["careplan_codes"] = data["careplan_codes"].apply(lambda x: x if isinstance(x, list) else [])
 
-    # Determine label (COVID-19 or not)
-    label = "non-COVID"
-    if not enc_conditions.empty:
-        if enc_conditions["CODE"].isin(covid_codes.keys()).any():
-            label = "COVID-19"
-    elif not enc_careplans.empty:
-        if enc_careplans["REASONCODE"].isin(covid_codes.keys()).any():
-            label = "COVID-19"
-
-    # Construct input text
-    input_text = (
-        f"Symptoms: {', '.join(symptoms) if symptoms else 'none'}; "
-        f"Medications: {', '.join(meds)}; "
-        f"Allergies: {', '.join(allergies)}"
+    # Combine symptoms and format text
+    print("Formatting final text...")
+    data["symptoms"] = data.apply(
+        lambda row: f"{row['symptoms_conditions']}{', ' if row['symptoms_conditions'] != 'none' and row['symptoms_observations'] != 'none' else ''}{row['symptoms_observations']}",
+        axis=1
     )
-    
-    return {"text": input_text, "label": label}
+    data["label"] = data.apply(
+        lambda row: "COVID-19" if (any(code in covid_codes for code in row["condition_codes"]) or 
+                                  any(code in covid_codes for code in row["careplan_codes"])) else "non-COVID",
+        axis=1
+    )
+    data["text"] = data.apply(
+        lambda row: f"Symptoms: {row['symptoms']}; Medications: {row['medications']}; Allergies: {row['allergies']}",
+        axis=1
+    )
+
+    return data[["text", "label"]]
 
 def main():
-    # Process all encounters
-    encounter_data = []
-    for _, enc in tqdm(dfs["encounters"].iterrows(), total=len(dfs["encounters"]), desc="Processing encounters"):
-        result = process_encounter(enc["Id"], enc["PATIENT"], dfs)
-        encounter_data.append(result)
+    # Process data
+    print("Preprocessing data...")
+    processed_df = preprocess_data(dfs)
 
     # Convert to Hugging Face Dataset
-    dataset = Dataset.from_list(encounter_data)
+    dataset = Dataset.from_pandas(processed_df.reset_index(drop=True))
 
     # Split into train, validation, and test sets
-    train_test = dataset.train_test_split(test_size=TRAIN_TEST_SPLIT, seed=RANDOM_SEED)
-    train_val = train_test["train"].train_test_split(test_size=VAL_TEST_SPLIT, seed=RANDOM_SEED)
+    train_test = dataset.train_test_split(test_size=TEST_SPLIT, seed=RANDOM_SEED)
+    train_val = train_test["train"].train_test_split(test_size=VAL_SPLIT, seed=RANDOM_SEED)
 
     final_dataset = {
         "train": train_val["train"],
@@ -91,15 +130,17 @@ def main():
     }
 
     # Save the dataset
-    output_dir = Path(OUTPUT_DIR)
+    output_dir = Path(PROCESSED_DATA_DIR)
     output_dir.mkdir(exist_ok=True)
     for split, ds in final_dataset.items():
         ds.to_csv(output_dir / f"{split}.csv", index=False)
 
+    # Print stats
+    print("Label distribution:", pd.Series(processed_df["label"]).value_counts())
     print("Data preparation complete. Dataset saved to:", output_dir)
     print("Train size:", len(final_dataset["train"]))
     print("Validation size:", len(final_dataset["validation"]))
     print("Test size:", len(final_dataset["test"]))
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

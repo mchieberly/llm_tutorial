@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Model
+/covid_classifier/
+
 # Data
 /raw_data/
 /processed_data/

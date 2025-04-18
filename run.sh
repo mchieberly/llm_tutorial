@@ -21,6 +21,4 @@ fi
 
 python -m src.interface
 
-# Open the chat interface (assuming firefox is installed)
-sleep 8
-firefox http://127.0.0.1:7860/
+# Open the chat interface at http://127.0.0.1:7860/

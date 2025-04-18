@@ -188,8 +188,6 @@ def main():
 	print("Train size:", len(final_dataset["train"]))
 	print("Validation size:", len(final_dataset["validation"]))
 	print("Test size:", len(final_dataset["test"]))
-	print("\nClass distribution in final training set:")
-	print(pd.Series(train_df_balanced["label"]).value_counts())
 	print("\nData preparation complete. Dataset saved to:", output_dir)
 
 if __name__ == "__main__":

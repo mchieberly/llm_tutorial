@@ -5,7 +5,7 @@ import torch
 from transformers import BitsAndBytesConfig, DataCollatorForLanguageModeling
 
 BASE_MODEL = "microsoft/phi-2"
-MAX_LENGTH = 64
+MAX_LENGTH = 128
 QLORA_R = 4
 QLORA_ALPHA = 8
 QLORA_DROPOUT = 0.05
@@ -13,7 +13,7 @@ BATCH_SIZE = 2
 GRAD_ACCUM_STEPS = 8
 TRAIN_EPOCHS = 1
 MAX_STEPS = 100
-LEARNING_RATE = 2e-5
+LEARNING_RATE = 1e-4
 LOGGING_STEPS = 20
 
 def formatting_func(example):
@@ -107,7 +107,7 @@ def main():
 		learning_rate=LEARNING_RATE,
 		logging_steps=LOGGING_STEPS,
 		fp16=True,
-		optim="paged_adamw_8bit",
+		optim="adamw_torch_4bit",
 		report_to="none",
 		save_strategy="epoch",
 		load_best_model_at_end=True,

@@ -5,34 +5,36 @@ from transformers import (
 	AutoTokenizer,
 	AutoModelForCausalLM,
 	TextIteratorStreamer,
-	pipeline
+	pipeline,
+	BitsAndBytesConfig
 )
 from threading import Thread
 
 TIMEOUT = 300.0
-MAX_NEW_TOKENS = 64
+MAX_NEW_TOKENS = 128
 BASE_MODEL = "microsoft/phi-2"
 
+quantization_config = BitsAndBytesConfig(load_in_4bit=True)
 base_model = AutoModelForCausalLM.from_pretrained(
 	BASE_MODEL,
 	device_map="auto",
 	trust_remote_code=True,
-	load_in_8bit=True,
+    quantization_config=quantization_config,
 	torch_dtype=torch.float16,
 )
 
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, add_bos_token=True, trust_remote_code=True, use_fast=False)
 tokenizer.pad_token = tokenizer.eos_token
-model = PeftModel.from_pretrained(base_model, "./covid_classifier/checkpoint-100")
 
-phi-2 = pipeline(
+phi2 = pipeline(
 	"text-generation",
 	tokenizer=tokenizer,
-	model=model,
+	model=base_model,
 	pad_token_id=tokenizer.eos_token_id,
 	eos_token_id=tokenizer.eos_token_id,
 	device_map="auto"
 )
+phi2.model = PeftModel.from_pretrained(base_model, "./covid_classifier/checkpoint-100")
 
 def generate(message, chat_history):
 	"""Accepts a prompt and generates text using the phi-2 pipeline"""
@@ -55,7 +57,7 @@ def generate(message, chat_history):
 		tokenizer=tokenizer, skip_prompt=True, skip_special_tokens=True, timeout=TIMEOUT
 	)
 	thread = Thread(
-		target=phi-2,
+		target=phi2,
 		kwargs={
 			"text_inputs": final_prompt,
 			"max_new_tokens": max_new_tokens,

@@ -1,20 +1,35 @@
 Preprocessing data...
 Aggregating data...
 Aggregating observations...
-Processing observations: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 40761/40761 [00:28<00:00, 1417.98it/s]
+Processing observations: 100%|████████████████████████████████| 40761/40761 [00:27<00:00, 1487.03it/s]
 Merging data...
-Merging steps: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 5/5 [00:01<00:00,  4.22it/s]
+Merging steps: 100%|████████████████████████████████████████████████████| 5/5 [00:01<00:00,  4.37it/s]
 Formatting final text...
-Creating CSV from Arrow format: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 232/232 [00:00<00:00, 270.54ba/s]
-Creating CSV from Arrow format: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 26/26 [00:00<00:00, 253.18ba/s]
-Creating CSV from Arrow format: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 65/65 [00:00<00:00, 275.06ba/s]
-Label distribution: label
-non-COVID    312378
-COVID-19       9150
-Name: count, dtype: int64
-Data preparation complete. Dataset saved to: processed_data
-Train size: 231499
-Validation size: 25723
-Test size: 64306
 
-...
+Class distribution before balancing:
+label
+non-COVID    216676
+COVID-19       6406
+Name: count, dtype: int64
+
+Class distribution after balancing:
+label
+non-COVID    216676
+COVID-19     216676
+Name: count, dtype: int64
+Creating CSV from Arrow format: 100%|██████████████████████████████| 434/434 [00:01<00:00, 373.45ba/s]
+Creating CSV from Arrow format: 100%|████████████████████████████████| 32/32 [00:00<00:00, 389.57ba/s]
+Creating CSV from Arrow format: 100%|████████████████████████████████| 67/67 [00:00<00:00, 392.58ba/s]
+
+Final dataset statistics:
+Train size: 433352
+Validation size: 31644
+Test size: 66802
+
+Class distribution in final training set:
+label
+non-COVID    216676
+COVID-19     216676
+Name: count, dtype: int64
+
+Data preparation complete. Dataset saved to: processed_data
